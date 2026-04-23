@@ -80,13 +80,13 @@ def extract_spectral_data(y_mono, y_left, y_right, sr):
             return -60.0
         return float(20 * np.log10(rms + 1e-10))
 
-    sub_bass = band_energy_db(20,   60)
-    bass     = band_energy_db(60,   250)
-    low_mid  = band_energy_db(250,  500)
-    mid      = band_energy_db(500,  2000)
-    high_mid = band_energy_db(2000, 5000)
-    high     = band_energy_db(5000, 8000)
-    air      = band_energy_db(8000, 20000)
+    sub_bass = band_energy_db(20,    60)
+    bass     = band_energy_db(60,    250)
+    low_mid  = band_energy_db(250,   500)
+    mid      = band_energy_db(500,   2000)
+    high_mid = band_energy_db(2000,  5000)
+    high     = band_energy_db(5000,  8000)
+    air      = band_energy_db(8000,  20000)
 
     # ── RMS and Peak (mono) ───────────────────────────────────
     rms_linear = float(np.sqrt(np.mean(y_mono ** 2)))
@@ -163,22 +163,22 @@ def build_comparison_report(user, ref):
     lines = []
     lines.append('MIX ANALYSIS COMPARISON REPORT\n')
 
-   def delta_label(user_val, ref_val, band_name, unit='dB'):
-    if user_val is None or ref_val is None:
-        return f'{band_name}: Data not available.'
-    diff      = user_val - ref_val
-    if abs(diff) < 0.5:
-        return f'{band_name}: Within 0.5{unit} of reference. Good.'
-    direction = 'hotter' if diff > 0 else 'below'
-    severity  = 'slightly' if abs(diff) < 2 else 'notably' if abs(diff) < 4 else 'significantly'
-    return f'{band_name}: User mix is {severity} {direction} than reference by {abs(diff):.1f}{unit}.'
+    def delta_label(user_val, ref_val, band_name, unit='dB'):
+        if user_val is None or ref_val is None:
+            return f'{band_name}: Data not available.'
+        diff      = user_val - ref_val
+        if abs(diff) < 0.5:
+            return f'{band_name}: Within 0.5{unit} of reference. Good.'
+        direction = 'hotter' if diff > 0 else 'below'
+        severity  = 'slightly' if abs(diff) < 2 else 'notably' if abs(diff) < 4 else 'significantly'
+        return f'{band_name}: User mix is {severity} {direction} than reference by {abs(diff):.1f}{unit}.'
 
     lines.append(delta_label(user['sub_bass'],  ref['sub_bass'],  'SUB BASS (20-60Hz)'))
     lines.append(delta_label(user['bass'],       ref['bass'],      'BASS (60-250Hz)'))
     lines.append(delta_label(user['low_mid'],    ref['low_mid'],   'LOW MID (250-500Hz)'))
     lines.append(delta_label(user['mid'],        ref['mid'],       'MID (500Hz-2kHz)'))
     lines.append(delta_label(user['high_mid'],   ref['high_mid'],  'HIGH MID (2k-5kHz)'))
-    lines.append(delta_label(user['high'],       ref['high'],      'HIGH (5k-8kHz)'))
+    lines.append(delta_label(user['high'],       ref.get('high'),  'HIGH (5k-8kHz)'))
     lines.append(delta_label(user['air'],        ref['air'],       'AIR (8k-20kHz)'))
 
     # Dynamics
