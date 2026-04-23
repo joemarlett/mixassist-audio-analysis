@@ -2,6 +2,7 @@ import os
 import io
 import numpy as np
 import librosa
+import soundfile as sf
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
@@ -13,7 +14,7 @@ CORS(app)
 # ============================================================
 @app.route('/', methods=['GET'])
 def health():
-    return jsonify({ 'status': 'MixAssist Audio Analysis is live!', 'version': '1.0' })
+    return jsonify({ 'status': 'MixAssist Audio Analysis is live!', 'version': '2.0' })
 
 # ============================================================
 # ANALYZE AUDIO
@@ -28,17 +29,35 @@ def analyze():
         if not file.filename:
             return jsonify({ 'error': 'Empty filename' }), 400
 
-        # Load audio from file buffer
-        audio_bytes = file.read()
+        audio_bytes  = file.read()
         audio_buffer = io.BytesIO(audio_bytes)
 
-        # Load with librosa — mono, 22050 Hz sample rate
-        y, sr = librosa.load(audio_buffer, mono=True, sr=22050, duration=180)
+        # ── Load stereo at native sample rate ─────────────────
+        # sr=None preserves original sample rate (44.1k, 48k, 96k etc)
+        # mono=False preserves stereo channels for accurate width/phase measurements
+        try:
+            audio_buffer.seek(0)
+            y_stereo, sr = librosa.load(audio_buffer, mono=False, sr=None, duration=180)
+        except Exception:
+            audio_buffer.seek(0)
+            y_stereo, sr = librosa.load(audio_buffer, mono=False, sr=44100, duration=180)
 
-        if len(y) == 0:
+        # ── Build mono sum for frequency analysis ─────────────
+        if y_stereo.ndim == 2:
+            # True stereo file — keep both
+            y_left  = y_stereo[0]
+            y_right = y_stereo[1]
+            y_mono  = (y_left + y_right) / 2.0
+        else:
+            # File was already mono
+            y_mono  = y_stereo
+            y_left  = y_stereo
+            y_right = y_stereo
+
+        if len(y_mono) == 0:
             return jsonify({ 'error': 'Could not decode audio file' }), 400
 
-        result = extract_spectral_data(y, sr)
+        result = extract_spectral_data(y_mono, y_left, y_right, sr)
         return jsonify(result)
 
     except Exception as e:
@@ -49,77 +68,84 @@ def analyze():
 # ============================================================
 # SPECTRAL EXTRACTION
 # ============================================================
-def extract_spectral_data(y, sr):
-    # ── Frequency band energy ─────────────────────────────────
-    # Use Short-Time Fourier Transform
-    stft = np.abs(librosa.stft(y, n_fft=2048, hop_length=512))
-    freqs = librosa.fft_frequencies(sr=sr, n_fft=2048)
+def extract_spectral_data(y_mono, y_left, y_right, sr):
+
+    # ── Frequency band energy (mono sum) ─────────────────────
+    stft  = np.abs(librosa.stft(y_mono, n_fft=4096, hop_length=512))
+    freqs = librosa.fft_frequencies(sr=sr, n_fft=4096)
 
     def band_energy_db(f_low, f_high):
         mask = (freqs >= f_low) & (freqs < f_high)
         if not np.any(mask):
             return -60.0
         band = stft[mask, :]
-        rms = np.sqrt(np.mean(band ** 2))
+        rms  = np.sqrt(np.mean(band ** 2))
         if rms == 0:
             return -60.0
         return float(20 * np.log10(rms + 1e-10))
 
-    sub_bass   = band_energy_db(20,   60)    # Sub bass
-    bass       = band_energy_db(60,   120)   # Bass
-    low_mid    = band_energy_db(120,  300)   # Low mid
-    mid        = band_energy_db(300,  2000)  # Mid
-    high_mid   = band_energy_db(2000, 8000)  # High mid
-    air        = band_energy_db(8000, 20000) # Air / presence
+    sub_bass = band_energy_db(20,    60)
+    bass     = band_energy_db(60,    120)
+    low_mid  = band_energy_db(120,   300)
+    mid      = band_energy_db(300,   2000)
+    high_mid = band_energy_db(2000,  8000)
+    air      = band_energy_db(8000,  20000)
 
-    # ── RMS and Peak ──────────────────────────────────────────
-    rms_linear = float(np.sqrt(np.mean(y ** 2)))
+    # ── RMS and Peak (mono) ───────────────────────────────────
+    rms_linear = float(np.sqrt(np.mean(y_mono ** 2)))
     rms_db     = float(20 * np.log10(rms_linear + 1e-10))
-    peak_db    = float(20 * np.log10(np.max(np.abs(y)) + 1e-10))
+    peak_db    = float(20 * np.log10(np.max(np.abs(y_mono)) + 1e-10))
 
-    # ── Dynamic Range ─────────────────────────────────────────
-    # Split into frames and measure variance
-    frame_length = sr // 4  # 250ms frames
+    # ── Dynamic Range (mono) ──────────────────────────────────
+    frame_length = sr // 4
     hop_length   = frame_length // 2
-    frames       = librosa.util.frame(y, frame_length=frame_length, hop_length=hop_length)
+    frames       = librosa.util.frame(y_mono, frame_length=frame_length, hop_length=hop_length)
     frame_rms    = np.sqrt(np.mean(frames ** 2, axis=0))
     frame_rms_db = 20 * np.log10(frame_rms + 1e-10)
-
-    # Dynamic range = difference between loud and quiet sections
-    p95 = float(np.percentile(frame_rms_db, 95))
-    p10 = float(np.percentile(frame_rms_db, 10))
+    p95          = float(np.percentile(frame_rms_db, 95))
+    p10          = float(np.percentile(frame_rms_db, 10))
     dynamic_range = float(p95 - p10)
 
-    # ── Stereo Width ──────────────────────────────────────────
-    # Load stereo version for width measurement
-    # Since we loaded mono, estimate width from spectral centroid variance
-    # (For true stereo width, we need the original stereo file)
-    spectral_centroids = librosa.feature.spectral_centroid(y=y, sr=sr)[0]
-    centroid_std       = float(np.std(spectral_centroids))
-    # Normalize to 0-1 score (higher = more varied = wider perceived)
-    stereo_width = float(min(1.0, centroid_std / 2000.0))
+    # ── TRUE Stereo Width (L/R correlation) ───────────────────
+    # Mid = L+R, Side = L-R
+    # Width = Side energy / (Mid energy + Side energy)
+    # 0 = pure mono, 1 = pure stereo/wide
+    mid_signal  = y_left + y_right
+    side_signal = y_left - y_right
+    mid_energy  = float(np.mean(mid_signal ** 2))
+    side_energy = float(np.mean(side_signal ** 2))
+    total_energy = mid_energy + side_energy
+    if total_energy < 1e-10:
+        stereo_width = 0.0
+    else:
+        stereo_width = float(round(side_energy / total_energy, 3))
 
-    # ── Mono Compatibility ────────────────────────────────────
-    # Estimate from low end consistency — good mono compatibility
-    # means sub bass is controlled and not phase-y
-    sub_stft    = stft[(freqs >= 20) & (freqs < 120), :]
-    sub_rms_frames = np.sqrt(np.mean(sub_stft ** 2, axis=0))
-    sub_consistency = float(1.0 - min(1.0, np.std(sub_rms_frames) / (np.mean(sub_rms_frames) + 1e-10)))
-    mono_compatibility = float(round(sub_consistency, 3))
+    # ── TRUE Mono Compatibility (L/R phase correlation) ───────
+    # Pearson correlation between L and R
+    # +1.0 = perfect mono compatibility
+    # 0.0  = completely unrelated channels
+    # -1.0 = completely out of phase (worst case)
+    # Normalize to 0-1 for display (0 = bad, 1 = perfect)
+    if np.std(y_left) < 1e-10 or np.std(y_right) < 1e-10:
+        mono_compatibility = 1.0
+    else:
+        correlation = float(np.corrcoef(y_left, y_right)[0, 1])
+        # Map from [-1, 1] to [0, 1]
+        mono_compatibility = float(round((correlation + 1.0) / 2.0, 3))
 
     return {
-        'sub_bass':          round(sub_bass,   2),
-        'bass':              round(bass,        2),
-        'low_mid':           round(low_mid,     2),
-        'mid':               round(mid,         2),
-        'high_mid':          round(high_mid,    2),
-        'air':               round(air,         2),
-        'rms':               round(rms_db,      2),
-        'peak':              round(peak_db,     2),
-        'dynamic_range':     round(dynamic_range, 2),
-        'stereo_width':      round(stereo_width,  3),
-        'mono_compatibility': mono_compatibility,
-        'duration_seconds':  round(len(y) / sr,   1)
+        'sub_bass':           round(sub_bass,        2),
+        'bass':               round(bass,             2),
+        'low_mid':            round(low_mid,          2),
+        'mid':                round(mid,              2),
+        'high_mid':           round(high_mid,         2),
+        'air':                round(air,              2),
+        'rms':                round(rms_db,           2),
+        'peak':               round(peak_db,          2),
+        'dynamic_range':      round(dynamic_range,    2),
+        'stereo_width':       round(stereo_width,     3),
+        'mono_compatibility': round(mono_compatibility, 3),
+        'duration_seconds':   round(len(y_mono) / sr, 1)
     }
 
 
@@ -129,7 +155,7 @@ def extract_spectral_data(y, sr):
 @app.route('/compare', methods=['POST'])
 def compare():
     try:
-        data = request.get_json()
+        data      = request.get_json()
         user_mix  = data.get('user_mix')
         reference = data.get('reference')
 
@@ -149,7 +175,7 @@ def build_comparison_report(user, ref):
     lines.append('MIX ANALYSIS COMPARISON REPORT\n')
 
     def delta_label(user_val, ref_val, band_name, unit='dB'):
-        diff = user_val - ref_val
+        diff      = user_val - ref_val
         if abs(diff) < 0.5:
             return f'{band_name}: Within 0.5{unit} of reference. Good.'
         direction = 'hotter' if diff > 0 else 'below'
@@ -183,11 +209,11 @@ def build_comparison_report(user, ref):
 
     # Mono compatibility
     if user['mono_compatibility'] < 0.6:
-        lines.append(f'MONO COMPATIBILITY: Score {user["mono_compatibility"]:.2f} — potential low end phase issues detected.')
+        lines.append(f'MONO COMPATIBILITY: Score {user["mono_compatibility"]:.2f} — potential phase issues detected.')
     elif user['mono_compatibility'] < 0.75:
-        lines.append(f'MONO COMPATIBILITY: Score {user["mono_compatibility"]:.2f} — minor low end inconsistencies. Check bass in mono.')
+        lines.append(f'MONO COMPATIBILITY: Score {user["mono_compatibility"]:.2f} — minor phase inconsistencies. Check in mono.')
     else:
-        lines.append(f'MONO COMPATIBILITY: Score {user["mono_compatibility"]:.2f} — low end is solid in mono.')
+        lines.append(f'MONO COMPATIBILITY: Score {user["mono_compatibility"]:.2f} — solid mono compatibility.')
 
     return '\n'.join(lines)
 
