@@ -163,13 +163,15 @@ def build_comparison_report(user, ref):
     lines = []
     lines.append('MIX ANALYSIS COMPARISON REPORT\n')
 
-    def delta_label(user_val, ref_val, band_name, unit='dB'):
-        diff      = user_val - ref_val
-        if abs(diff) < 0.5:
-            return f'{band_name}: Within 0.5{unit} of reference. Good.'
-        direction = 'hotter' if diff > 0 else 'below'
-        severity  = 'slightly' if abs(diff) < 2 else 'notably' if abs(diff) < 4 else 'significantly'
-        return f'{band_name}: User mix is {severity} {direction} than reference by {abs(diff):.1f}{unit}.'
+   def delta_label(user_val, ref_val, band_name, unit='dB'):
+    if user_val is None or ref_val is None:
+        return f'{band_name}: Data not available.'
+    diff      = user_val - ref_val
+    if abs(diff) < 0.5:
+        return f'{band_name}: Within 0.5{unit} of reference. Good.'
+    direction = 'hotter' if diff > 0 else 'below'
+    severity  = 'slightly' if abs(diff) < 2 else 'notably' if abs(diff) < 4 else 'significantly'
+    return f'{band_name}: User mix is {severity} {direction} than reference by {abs(diff):.1f}{unit}.'
 
     lines.append(delta_label(user['sub_bass'],  ref['sub_bass'],  'SUB BASS (20-60Hz)'))
     lines.append(delta_label(user['bass'],       ref['bass'],      'BASS (60-250Hz)'))
